@@ -1,0 +1,17 @@
+// .devcontainer/devcontainer.json
+{
+  "name": "moving-3d-planner",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:22",
+  "forwardPorts": [3000],
+  "portsAttributes": {
+    "3000": {
+      "label": "Next.js App",
+      "onAutoForward": "notify"
+    }
+  },
+  "containerEnv": {
+    "WATCHPACK_POLLING": "true"
+  },
+  "postCreateCommand": "if [ -f package.json ]; then npm install; fi",
+  "remoteUser": "node"
+}
