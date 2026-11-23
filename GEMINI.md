@@ -20,7 +20,7 @@
 ### 1. 将来のリアル3Dモデル（GLB）移行を見据えた抽象化
 家具の3D表現と生成ロジックは、初期実装のプロシージャル形状から外部Image-to-3D API（.glb）へ容易に差し替えられるインターフェースを維持すること。
 - データモデル（`FurnitureAsset`）の `model` フィールドは判別共用体とする:
-  - `{ kind: 'procedural'; shapeType: string; color: string; partsHint?: string[] }`
+  - `{ kind: 'procedural'; shapeType: string; color: string; partsHint?: string[]; customModel?: CustomProceduralModel }`
   - `{ kind: 'glb'; url: string; normalizeScale: boolean }`
 - 3D描画は `<FurnitureModelRenderer asset={asset} dimensions={dimensions} />` の単一コンポーネントに集約し、`kind` に応じてプロシージャル描画とGLB読み込み（バウンディングボックスを実寸 `dimensions` に自動フィットさせる処理を含む）を切り替えられる構造にする。
 - 家具解析・生成は `FurnitureGenerationProvider` インターフェース越しに呼び出す設計にする。
