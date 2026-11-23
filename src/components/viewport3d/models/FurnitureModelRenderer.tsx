@@ -2,6 +2,7 @@
 
 import React, { Component, Suspense } from 'react';
 import type { FurnitureModelRendererProps } from '@/types/planner';
+import { CustomProceduralFurnitureMesh } from './CustomProceduralFurnitureMesh';
 import { GlbFurnitureMesh } from './GlbFurnitureMesh';
 import { ProceduralFurnitureMesh } from './ProceduralFurnitureMesh';
 
@@ -80,6 +81,21 @@ export function FurnitureModelRenderer({
           />
         </Suspense>
       </GlbErrorBoundary>
+    );
+  }
+
+  if (
+    asset.model.shapeType === 'custom' &&
+    asset.model.customModel &&
+    asset.model.customModel.parts.length > 0
+  ) {
+    return (
+      <CustomProceduralFurnitureMesh
+        customModel={asset.model.customModel}
+        dimensions={dimensions}
+        isSelected={isSelected}
+        isHovered={isHovered}
+      />
     );
   }
 

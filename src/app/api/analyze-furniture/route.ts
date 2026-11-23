@@ -1,6 +1,13 @@
 import { NextResponse } from 'next/server';
 import { Type, type Schema } from '@google/genai';
 import {
+  CUSTOM_MODEL_DESIGN_RULES,
+  CUSTOM_MODEL_SCHEMA,
+  clampCm,
+  normalizeHexColor,
+  sanitizeCustomProceduralModel,
+} from '@/lib/furniture-custom-model';
+import {
   createGeminiClient,
   extractJsonText,
   getGeminiModelName,
@@ -9,9 +16,10 @@ import {
 } from '@/lib/gemini';
 import type {
   DimensionPromptField,
+  FurnitureAnalysisMode,
   FurnitureAnalysisResult,
   FurnitureCategory,
-  KnownProceduralShapeType,
+  TemplateProceduralShapeType,
 } from '@/types/planner';
 
 const VALID_CATEGORIES = new Set<FurnitureCategory>([
@@ -27,7 +35,7 @@ const VALID_CATEGORIES = new Set<FurnitureCategory>([
   'other',
 ]);
 
-const VALID_SHAPES = new Set<KnownProceduralShapeType>([
+const VALID_TEMPLATE_SHAPES = new Set<TemplateProceduralShapeType>([
   'sofa',
   'bed',
   'table',
@@ -42,7 +50,7 @@ const VALID_SHAPES = new Set<KnownProceduralShapeType>([
   'box',
 ]);
 
-const CATEGORY_FALLBACK_SHAPE: Record<FurnitureCategory, KnownProceduralShapeType> = {
+const CATEGORY_FALLBACK_SHAPE: Record<FurnitureCategory, TemplateProceduralShapeType> = {
   sofa: 'sofa',
   bed: 'bed',
   table: 'table',
@@ -55,120 +63,133 @@ const CATEGORY_FALLBACK_SHAPE: Record<FurnitureCategory, KnownProceduralShapeTyp
   other: 'box',
 };
 
-const FURNITURE_RESPONSE_SCHEMA: Schema = {
-  type: Type.OBJECT,
-  properties: {
-    suggestedName: {
-      type: Type.STRING,
-      description:
-        '特徴を含んだわかりやすい日本語の家具名（例: ネイビーの2.5人掛けソファ、オーク材ダイニングテーブル）',
+const BASE_FURNITURE_PROPERTIES: Record<string, Schema> = {
+  suggestedName: {
+    type: Type.STRING,
+    description:
+      '特徴を含んだわかりやすい日本語の家具名（例: ネイビーの2.5人掛けソファ、オーク材ダイニングテーブル）',
+  },
+  category: {
+    type: Type.STRING,
+    enum: [
+      'sofa',
+      'bed',
+      'table',
+      'desk',
+      'chair',
+      'storage',
+      'tv_stand',
+      'appliance',
+      'rug',
+      'other',
+    ],
+  },
+  primaryColor: {
+    type: Type.STRING,
+    description: '家具本体の代表的な色を表す6桁HEXカラーコード（例: #5B7489）',
+  },
+  shapeType: {
+    type: Type.STRING,
+    enum: [
+      'sofa',
+      'bed',
+      'table',
+      'desk',
+      'chair',
+      'shelf',
+      'cabinet',
+      'tv_stand',
+      'refrigerator',
+      'washing_machine',
+      'rug',
+      'box',
+    ],
+    description: '定型3Dテンプレートの中で最も近い形状タイプ',
+  },
+  partsHint: {
+    type: Type.ARRAY,
+    description:
+      '家具の視覚的特徴を表す英語スネークケースのパーツヒント配列（例: arms, armless, wooden_legs, steel_legs, headboard, side_drawer, glass_top, drawers, cushion）',
+    items: { type: Type.STRING },
+  },
+  estimatedDimensionsCm: {
+    type: Type.OBJECT,
+    description: '写真から推定される一般的なサイズ目安（cm単位の整数）',
+    properties: {
+      width: { type: Type.NUMBER, description: '幅 (cm)' },
+      depth: { type: Type.NUMBER, description: '奥行 (cm)' },
+      height: { type: Type.NUMBER, description: '高さ (cm)' },
     },
-    category: {
-      type: Type.STRING,
-      enum: [
-        'sofa',
-        'bed',
-        'table',
-        'desk',
-        'chair',
-        'storage',
-        'tv_stand',
-        'appliance',
-        'rug',
-        'other',
-      ],
-    },
-    primaryColor: {
-      type: Type.STRING,
-      description: '家具本体の代表的な色を表す6桁HEXカラーコード（例: #5B7489）',
-    },
-    shapeType: {
-      type: Type.STRING,
-      enum: [
-        'sofa',
-        'bed',
-        'table',
-        'desk',
-        'chair',
-        'shelf',
-        'cabinet',
-        'tv_stand',
-        'refrigerator',
-        'washing_machine',
-        'rug',
-        'box',
-      ],
-      description: '3Dプロシージャル描画で最も近い形状タイプ',
-    },
-    partsHint: {
-      type: Type.ARRAY,
-      description:
-        '家具の視覚的特徴を表す英語スネークケースのパーツヒント配列（例: arms, armless, wooden_legs, steel_legs, headboard, side_drawer, glass_top, drawers, cushion）',
-      items: { type: Type.STRING },
-    },
-    estimatedDimensionsCm: {
+    required: ['width', 'depth', 'height'],
+  },
+  requiredDimensionFields: {
+    type: Type.ARRAY,
+    description:
+      'ユーザーに実寸採寸をお願いする3項目（width, depth, height）。家具の形状に即した具体的な測り方ヒントを日本語で添える。',
+    items: {
       type: Type.OBJECT,
-      description: '写真から推定される一般的なサイズ目安（cm単位の整数）',
       properties: {
-        width: { type: Type.NUMBER, description: '幅 (cm)' },
-        depth: { type: Type.NUMBER, description: '奥行 (cm)' },
-        height: { type: Type.NUMBER, description: '高さ (cm)' },
-      },
-      required: ['width', 'depth', 'height'],
-    },
-    requiredDimensionFields: {
-      type: Type.ARRAY,
-      description:
-        'ユーザーに実寸採寸をお願いする3項目（width, depth, height）。家具の形状に即した具体的な測り方ヒントを日本語で添える。',
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          key: {
-            type: Type.STRING,
-            enum: ['width', 'depth', 'height'],
-          },
-          label: {
-            type: Type.STRING,
-            description: '日本語ラベル（例: 幅 (W) / 奥行 (D) / 高さ (H)）',
-          },
-          placeholderCm: {
-            type: Type.NUMBER,
-            description: '目安の入力値 (cm)',
-          },
-          hint: {
-            type: Type.STRING,
-            description:
-              'どこからどこまで測るかの親切な日本語ヒント（例: 肘掛けの外側から外側まで）',
-          },
+        key: {
+          type: Type.STRING,
+          enum: ['width', 'depth', 'height'],
         },
-        required: ['key', 'label', 'placeholderCm', 'hint'],
+        label: {
+          type: Type.STRING,
+          description: '日本語ラベル（例: 幅 (W) / 奥行 (D) / 高さ (H)）',
+        },
+        placeholderCm: {
+          type: Type.NUMBER,
+          description: '目安の入力値 (cm)',
+        },
+        hint: {
+          type: Type.STRING,
+          description:
+            'どこからどこまで測るかの親切な日本語ヒント（例: 肘掛けの外側から外側まで）',
+        },
       },
-    },
-    summaryJa: {
-      type: Type.STRING,
-      description:
-        '写真から読み取った家具の特徴と、実寸サイズ入力を促す親しみやすい日本語コメント（1〜2文）',
+      required: ['key', 'label', 'placeholderCm', 'hint'],
     },
   },
-  required: [
-    'suggestedName',
-    'category',
-    'primaryColor',
-    'shapeType',
-    'partsHint',
-    'estimatedDimensionsCm',
-    'requiredDimensionFields',
-    'summaryJa',
-  ],
+  summaryJa: {
+    type: Type.STRING,
+    description:
+      '写真から読み取った家具の特徴と、実寸サイズ入力を促す親しみやすい日本語コメント（1〜2文）',
+  },
 };
 
-const FURNITURE_PROMPT = `あなたは引っ越し検討者向けのインテリア・家具アドバイザーです。
+const BASE_REQUIRED_FIELDS = [
+  'suggestedName',
+  'category',
+  'primaryColor',
+  'shapeType',
+  'partsHint',
+  'estimatedDimensionsCm',
+  'requiredDimensionFields',
+  'summaryJa',
+];
+
+const FURNITURE_TEMPLATE_RESPONSE_SCHEMA: Schema = {
+  type: Type.OBJECT,
+  properties: BASE_FURNITURE_PROPERTIES,
+  required: BASE_REQUIRED_FIELDS,
+};
+
+const FURNITURE_RECONSTRUCT_RESPONSE_SCHEMA: Schema = {
+  type: Type.OBJECT,
+  properties: {
+    ...BASE_FURNITURE_PROPERTIES,
+    customModel: CUSTOM_MODEL_SCHEMA,
+  },
+  required: [...BASE_REQUIRED_FIELDS, 'customModel'],
+};
+
+const FURNITURE_TEMPLATE_PROMPT = `あなたは引っ越し検討者向けのインテリア・家具アドバイザーです。
 添付された家具の写真を解析し、3D部屋シミュレーションに登録するための特徴と、ユーザーに実寸（cm）を入力してもらうための案内を JSON で返してください。
 
 【解析ルール】
 1. suggestedName は色・素材・サイズ感を含んだ自然な日本語名にしてください（20文字以内目安）。
 2. primaryColor は家具の面積が最も大きい本体の色を正確な6桁HEXコード（#RRGGBB）で抽出してください。
-3. shapeType は最も見た目に近いプロシージャル形状を選んでください：
+3. shapeType は最も見た目に近い定型プロシージャル形状を選んでください：
    - 扉・引き出しがある収納やチェスト → cabinet
    - 本棚・オープンラック → shelf
    - ローボード・テレビ台 → tv_stand
@@ -182,36 +203,28 @@ const FURNITURE_PROMPT = `あなたは引っ越し検討者向けのインテリ
 6. requiredDimensionFields には必ず width, depth, height の3項目を順番に含め、この家具をメジャーで測るときに「どこからどこまで測ればよいか」が直感的に分かる具体的な日本語 hint を書いてください。
 7. summaryJa は「○○と判定しました。正確なサイズ感を確認するため、幅・奥行・高さ（cm）を入力してください。」のような親切な日本語にしてください。`;
 
-function normalizeHexColor(value: unknown): string {
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
-      return trimmed.toUpperCase();
-    }
-    if (/^#[0-9a-fA-F]{3}$/.test(trimmed)) {
-      const r = trimmed[1];
-      const g = trimmed[2];
-      const b = trimmed[3];
-      return `#${r}${r}${g}${g}${b}${b}`.toUpperCase();
-    }
-  }
-  return '#6B7C8F';
-}
+const FURNITURE_RECONSTRUCT_PROMPT = `${FURNITURE_TEMPLATE_PROMPT}
 
-function clampCm(value: unknown, fallback: number, min = 1, max = 500): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
-  return Math.round(Math.min(max, Math.max(min, value)));
-}
+さらに今回は、定型テンプレートだけでなく **写真に写っているこの家具そのものを3Dパーツの組み合わせで忠実に立体再現する customModel** も同時に生成してください。
+- customModel.designDimensionsCm には、あなたが推定した estimatedDimensionsCm と一致する幅・奥行・高さ（cm）を設定し、その空間内に収まるように各パーツを配置してください。
+- shapeType には、万一定型テンプレートへ切り替えた際に最も近いフォールバック型を入れてください。
 
-function sanitizeFurnitureResult(raw: unknown): FurnitureAnalysisResult {
-  const data = (raw && typeof raw === 'object' ? raw : {}) as Partial<FurnitureAnalysisResult>;
+${CUSTOM_MODEL_DESIGN_RULES}`;
+
+function sanitizeFurnitureResult(
+  raw: unknown,
+  mode: FurnitureAnalysisMode,
+): FurnitureAnalysisResult {
+  const data = (raw && typeof raw === 'object' ? raw : {}) as Partial<FurnitureAnalysisResult> & {
+    customModel?: unknown;
+  };
 
   const category: FurnitureCategory =
     data.category && VALID_CATEGORIES.has(data.category) ? data.category : 'other';
 
-  const shapeType: KnownProceduralShapeType =
-    data.shapeType && VALID_SHAPES.has(data.shapeType as KnownProceduralShapeType)
-      ? (data.shapeType as KnownProceduralShapeType)
+  const templateShapeType: TemplateProceduralShapeType =
+    data.shapeType && VALID_TEMPLATE_SHAPES.has(data.shapeType as TemplateProceduralShapeType)
+      ? (data.shapeType as TemplateProceduralShapeType)
       : CATEGORY_FALLBACK_SHAPE[category];
 
   const primaryColor = normalizeHexColor(data.primaryColor);
@@ -286,20 +299,33 @@ function sanitizeFurnitureResult(raw: unknown): FurnitureAnalysisResult {
       ? data.suggestedName.trim()
       : 'マイ家具';
 
+  const customModel =
+    mode === 'reconstruct'
+      ? sanitizeCustomProceduralModel(
+          data.customModel,
+          estimatedDimensionsCm,
+          primaryColor,
+        )
+      : undefined;
+
   const summaryJa =
     typeof data.summaryJa === 'string' && data.summaryJa.trim()
       ? data.summaryJa.trim()
-      : `「${suggestedName}」として特徴を読み取りました。実寸サイズ（cm）を入力してカタログへ登録してください。`;
+      : customModel
+        ? `「${suggestedName}」として写真から3Dモデルを構築しました。実寸サイズ（cm）を入力してカタログへ登録してください。`
+        : `「${suggestedName}」として特徴を読み取りました。実寸サイズ（cm）を入力してカタログへ登録してください。`;
 
   return {
     suggestedName,
     category,
     primaryColor,
-    shapeType,
+    shapeType: customModel ? 'custom' : templateShapeType,
+    fallbackTemplateShapeType: templateShapeType,
     partsHint,
     estimatedDimensionsCm,
     requiredDimensionFields,
     summaryJa,
+    customModel,
   };
 }
 
@@ -308,6 +334,7 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       imageDataUrl?: string;
       mimeType?: string;
+      mode?: FurnitureAnalysisMode;
     };
 
     if (!body.imageDataUrl || typeof body.imageDataUrl !== 'string') {
@@ -316,6 +343,9 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+
+    const mode: FurnitureAnalysisMode =
+      body.mode === 'template' ? 'template' : 'reconstruct';
 
     const ai = createGeminiClient();
     const model = getGeminiModelName();
@@ -333,12 +363,18 @@ export async function POST(request: Request) {
             data: base64Data,
           },
         },
-        FURNITURE_PROMPT,
+        mode === 'reconstruct'
+          ? FURNITURE_RECONSTRUCT_PROMPT
+          : FURNITURE_TEMPLATE_PROMPT,
       ],
       config: {
         responseMimeType: 'application/json',
-        responseSchema: FURNITURE_RESPONSE_SCHEMA,
-        temperature: 0.2,
+        responseSchema:
+          mode === 'reconstruct'
+            ? FURNITURE_RECONSTRUCT_RESPONSE_SCHEMA
+            : FURNITURE_TEMPLATE_RESPONSE_SCHEMA,
+        temperature: mode === 'reconstruct' ? 0.25 : 0.2,
+        maxOutputTokens: mode === 'reconstruct' ? 8192 : 2048,
       },
     });
 
@@ -355,7 +391,7 @@ export async function POST(request: Request) {
     }
 
     const parsedJson = JSON.parse(extractJsonText(rawText)) as unknown;
-    const sanitized = sanitizeFurnitureResult(parsedJson);
+    const sanitized = sanitizeFurnitureResult(parsedJson, mode);
 
     return NextResponse.json(sanitized);
   } catch (error) {

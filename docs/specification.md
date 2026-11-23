@@ -36,11 +36,12 @@ src/
 │   ├── page.tsx                         # エントリページ
 │   └── api/
 │       ├── analyze-floorplan/route.ts   # 間取り図AI解析 API
-│       └── analyze-furniture/route.ts   # 家具写真AI解析 API
+│       ├── analyze-furniture/route.ts   # 家具写真AI解析・3Dパーツ構築 API
+│       └── reconstruct-furniture/route.ts # 家具写真からの3Dパーツ再構築専用 API
 ├── components/
 │   ├── layout/                          # ワークスペース枠（HeaderBar, LeftSidebar, InspectorPanel, DataTransferModal）
 │   ├── viewport3d/                      # 3D空間描画（RoomCanvas3D, RoomStructure3D, CameraController, FixedFixtureMesh, PlacedFurnitureItem）
-│   │   └── models/                      # 家具描画抽象層（FurnitureModelRenderer, ProceduralFurnitureMesh, GlbFurnitureMesh）
+│   │   └── models/                      # 家具描画抽象層（FurnitureModelRenderer, ProceduralFurnitureMesh, CustomProceduralFurnitureMesh, GlbFurnitureMesh）
 │   ├── editor2d/                        # 2D間取りエディタ（FloorplanEditor2D, FloorplanUploadModal, ScaleCalibrationModal）
 │   └── furniture/                       # 家具登録モーダル・3Dプレビュー（FurnitureRegisterModal, FurniturePreview3D）
 ├── services/furniture/                  # 家具解析・モデル生成プロバイダ層（provider.ts, procedural-provider.ts, glb-provider.ts）
@@ -60,7 +61,13 @@ src/
 - `model` フィールドは以下の判別共用体（`FurnitureModelSpec`）とし、プロシージャルと GLB を透過的に扱う。
   ```ts
   type FurnitureModelSpec =
-    | { kind: 'procedural'; shapeType: ProceduralShapeType; color: string; partsHint?: string[] }
+    | {
+        kind: 'procedural';
+        shapeType: ProceduralShapeType;
+        color: string;
+        partsHint?: string[];
+        customModel?: CustomProceduralModel;
+      }
     | { kind: 'glb'; url: string; normalizeScale: boolean };
   ```
 
@@ -113,16 +120,18 @@ src/
 | エンドポイント | 入力（リサイズ上限） | 抽出内容と後処理 |
 | --- | --- | --- |
 | `POST /api/analyze-floorplan` | 間取り図画像（長辺最大 `1600px`） | 正規化座標 (`0〜1000`) で頂点・壁・建具・固定設備・推定画像横幅 (m) を抽出。`floorplan-converter.ts` でワールド座標 (m) に変換し、8cm 以内の近接頂点を自動マージ、固定設備は `locked: true` で登録。AI解析を使わず画像のみを背景敷きするモードにも対応。 |
-| `POST /api/analyze-furniture` | 家具写真（解析用 `1024px` / サムネイル `320px`） | 家具名案、カテゴリ、代表色 (HEX)、プロシージャル形状タイプ（12種）、視覚特徴 (`partsHint`)、目安寸法、箇所別採寸ヒントを抽出。対話型フォームでユーザーに実寸 (cm) 入力を促し、3D プレビューを確認してカタログへ登録。手動登録・外部 GLB URL 指定にも対応。 |
+| `POST /api/analyze-furniture` | 家具写真（解析用 `1024px` / サムネイル `320px`） | 家具名案、カテゴリ、代表色 (HEX)、定型形状タイプ（12種）、視覚特徴 (`partsHint`)、目安寸法、箇所別採寸ヒントを抽出。`mode: 'reconstruct'` 指定時は写真の家具を複数3Dプリミティブパーツで立体再現する `customModel` も同時生成。対話型フォームで「AI画像再現」と「定型テンプレート」を自由に切り替え、実寸 (cm) 入力・3Dプレビュー確認後にカタログへ登録。 |
+| `POST /api/reconstruct-furniture` | 家具写真 ＋ 任意の実寸 (cm) ・微調整ヒント | 写真固有の構造（脚・天板・棚・クッション・色分け・質感等）を 8〜36 個程度のプリミティブパーツ (`box`, `rounded_box`, `cylinder`, `sphere`, `capsule`, `cone`, `torus`, `arch`) へ分解して `CustomProceduralModel` を構築・再構築。実寸入力後の比率合わせや既存家具の編集画面からのアップグレードにも対応。 |
 
 ### 4.5 将来のリアル 3D モデル (GLB) 移行アーキテクチャ
 初期実装のプロシージャル形状から外部 Image-to-3D API（`.glb`）へ最小限の変更で差し替えられるよう、以下2層を抽象化しています。
 
 1. **描画層の統一（`<FurnitureModelRenderer />`）**:
-   - `asset.model.kind === 'procedural'` → `ProceduralFurnitureMesh`（12形状 + `partsHint` によるパーツ表現）。
+   - `asset.model.kind === 'procedural'` かつ `shapeType === 'custom'`（`customModel` あり）→ `CustomProceduralFurnitureMesh`（AI構築パーツ群の回転込み厳密バウンディングボックスを算出し、底面中央 `(0, 0, 0)` 接地＋実寸 `dimensions` へ自動フィット）。
+   - `asset.model.kind === 'procedural'`（定型）→ `ProceduralFurnitureMesh`（12形状 + `partsHint` によるパーツ表現）。
    - `asset.model.kind === 'glb'` → `GlbFurnitureMesh`（`useGLTF` で読み込み、`normalizeScale: true` 時は `THREE.Box3` から実寸 `dimensions` へ自動フィット＋底面中央を原点 `(0, 0, 0)` に補正）。`Suspense` による仮ワイヤーフレーム表示と `GlbErrorBoundary` によるフォールバック描画を内包。
 2. **生成ロジックの抽象化（`FurnitureGenerationProvider`）**:
-   - UI（`FurnitureRegisterModal`）は `getFurnitureGenerationProvider()` 経由で `analyzeImage()` / `generateModel()` のみを呼び出す。
+   - UI（`FurnitureRegisterModal`）は `getFurnitureGenerationProvider()` 経由で `analyzeImage()` / `reconstructFromImage()` / `generateModel()` のみを呼び出す。
    - 現行は `ProceduralFurnitureProvider` を返却。将来外部 GLB 生成 API を接続する際は `GlbFurnitureProvider` を実装して `src/services/furniture/provider.ts` のファクトリを切り替えるだけで移行可能。
 
 ---

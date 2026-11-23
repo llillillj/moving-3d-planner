@@ -38,8 +38,8 @@ export type FurnitureCategory =
   | 'rug'
   | 'other';
 
-/** 既知のプロシージャル形状タイプ（string 互換を維持しつつ補完を有効化） */
-export type KnownProceduralShapeType =
+/** 既存の定型プロシージャル形状タイプ（12種） */
+export type TemplateProceduralShapeType =
   | 'sofa'
   | 'bed'
   | 'table'
@@ -53,7 +53,78 @@ export type KnownProceduralShapeType =
   | 'rug'
   | 'box';
 
+/** 既知のプロシージャル形状タイプ（AI画像再現の custom を含む） */
+export type KnownProceduralShapeType = 'custom' | TemplateProceduralShapeType;
+
 export type ProceduralShapeType = KnownProceduralShapeType | (string & {});
+
+/** AIパーツ構築で使用する3Dプリミティブ種別 */
+export type ProceduralPartPrimitive =
+  | 'box'
+  | 'rounded_box'
+  | 'cylinder'
+  | 'sphere'
+  | 'capsule'
+  | 'cone'
+  | 'torus'
+  | 'arch';
+
+/** AIパーツ構築で使用するマテリアル質感プリセット */
+export type ProceduralPartMaterial =
+  | 'wood'
+  | 'fabric'
+  | 'leather'
+  | 'metal'
+  | 'glass'
+  | 'mirror'
+  | 'plastic'
+  | 'ceramic'
+  | 'matte'
+  | 'emissive';
+
+/**
+ * AI画像再現によるカスタム3D家具の個別パーツ仕様
+ * 座標・サイズはすべて設計空間 (cm) で定義（底面中央 = [0, 0, 0]、Y軸上向き、正面 = +Z）。
+ * 描画時に家具全体の実寸 dimensions (m) へ厳密にバウンディングボックス正規化フィットされる。
+ */
+export interface ProceduralPartSpec {
+  /** パーツ名（例: 座面クッション左、木製天板、右前脚） */
+  name: string;
+  /** プリミティブ形状 */
+  primitive: ProceduralPartPrimitive;
+  /** パーツ中心座標 [x, y, z] (cm) */
+  position: [number, number, number];
+  /** パーツ寸法 [width(X), height(Y), depth(Z)] (cm) */
+  size: [number, number, number];
+  /** オイラー回転 [rx, ry, rz] (度数法 degrees) */
+  rotationDeg?: [number, number, number];
+  /** パーツ色（6桁HEX） */
+  color: string;
+  /** 質感プリセット */
+  material?: ProceduralPartMaterial;
+  /** 不透明度 (0.1〜1.0) */
+  opacity?: number;
+  /** rounded_box 用の角丸比率 (0.02〜0.45) */
+  cornerRadius?: number;
+  /** cylinder 用の上面半径スケール (0.05〜1.5) */
+  topScale?: number;
+  /** cylinder 用の底面半径スケール (0.05〜1.5) */
+  bottomScale?: number;
+}
+
+/** 添付画像からAIがパーツ構成で再構築したカスタム3Dモデル設計図 */
+export interface CustomProceduralModel {
+  /** パーツ座標の基準となった設計サイズ (cm) */
+  designDimensionsCm: {
+    width: number;
+    depth: number;
+    height: number;
+  };
+  /** 構築された3Dパーツ配列 */
+  parts: ProceduralPartSpec[];
+  /** 再現した構造の日本語サマリー */
+  structureSummaryJa?: string;
+}
 
 /**
  * 家具3Dモデルの判別共用体（GEMINI.md 必須要件）
@@ -65,6 +136,8 @@ export type FurnitureModelSpec =
       shapeType: ProceduralShapeType;
       color: string;
       partsHint?: string[];
+      /** 画像からAI構築したカスタム3Dモデル設計図（shapeType === 'custom' 時に使用） */
+      customModel?: CustomProceduralModel;
     }
   | {
       kind: 'glb';
@@ -258,12 +331,17 @@ export interface DimensionPromptField {
   hint?: string;
 }
 
+/** 家具画像解析の生成モード（画像から3D構築 / 定型テンプレート判定） */
+export type FurnitureAnalysisMode = 'reconstruct' | 'template';
+
 /** /api/analyze-furniture の解析結果 */
 export interface FurnitureAnalysisResult {
   suggestedName: string;
   category: FurnitureCategory;
   primaryColor: string;
   shapeType: ProceduralShapeType;
+  /** 定型テンプレートへ切り替えた場合の推奨形状 */
+  fallbackTemplateShapeType?: TemplateProceduralShapeType;
   partsHint: string[];
   estimatedDimensionsCm: {
     width: number;
@@ -272,6 +350,24 @@ export interface FurnitureAnalysisResult {
   };
   requiredDimensionFields: DimensionPromptField[];
   summaryJa: string;
+  /** mode='reconstruct' 時に生成されるカスタム3Dパーツ構成 */
+  customModel?: CustomProceduralModel;
+}
+
+/** /api/reconstruct-furniture への入力 */
+export interface FurnitureReconstructInput {
+  imageDataUrl: string;
+  mimeType: string;
+  suggestedName?: string;
+  category?: FurnitureCategory;
+  /** ユーザーが入力した実寸または目安サイズ (cm) */
+  dimensionsCm?: {
+    width: number;
+    depth: number;
+    height: number;
+  };
+  /** 任意の微調整ヒント（例: 脚を細く、棚を4段に） */
+  userHint?: string;
 }
 
 export interface FurnitureModelBuildInput {
@@ -283,13 +379,20 @@ export interface FurnitureModelBuildInput {
 
 /**
  * 家具解析・モデル生成プロバイダの共通インターフェース
- * 初期実装: ProceduralFurnitureProvider
+ * 初期実装: ProceduralFurnitureProvider（定型テンプレート + Gemini AIパーツ構築）
  * 将来拡張: 外部 Image-to-3D API を呼んで kind: 'glb' を返す Provider に差し替え
  */
 export interface FurnitureGenerationProvider {
   readonly id: string;
   readonly displayName: string;
-  analyzeImage(imageDataUrl: string, mimeType: string): Promise<FurnitureAnalysisResult>;
+  analyzeImage(
+    imageDataUrl: string,
+    mimeType: string,
+    options?: { mode?: FurnitureAnalysisMode },
+  ): Promise<FurnitureAnalysisResult>;
+  reconstructFromImage(
+    input: FurnitureReconstructInput,
+  ): Promise<CustomProceduralModel>;
   generateModel(input: FurnitureModelBuildInput): Promise<FurnitureModelSpec>;
 }
 

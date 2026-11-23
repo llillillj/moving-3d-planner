@@ -2,7 +2,9 @@ import type {
   Dimensions3D,
   FixedFixtureKind,
   FurnitureCategory,
+  FurnitureModelSpec,
   KnownProceduralShapeType,
+  TemplateProceduralShapeType,
 } from '@/types/planner';
 
 /** メートル → センチメートル（表示用に小数第1位で丸め） */
@@ -93,7 +95,10 @@ export const FURNITURE_CATEGORY_LABELS: Record<FurnitureCategory, string> = {
   other: 'その他',
 };
 
-export const PROCEDURAL_SHAPE_LABELS: Record<KnownProceduralShapeType, string> = {
+export const TEMPLATE_PROCEDURAL_SHAPE_LABELS: Record<
+  TemplateProceduralShapeType,
+  string
+> = {
   sofa: 'ソファ型',
   bed: 'ベッド型',
   table: 'ダイニングテーブル型',
@@ -107,6 +112,20 @@ export const PROCEDURAL_SHAPE_LABELS: Record<KnownProceduralShapeType, string> =
   rug: 'ラグ型',
   box: 'シンプルボックス',
 };
+
+export const PROCEDURAL_SHAPE_LABELS: Record<KnownProceduralShapeType, string> = {
+  custom: 'AI画像再現（カスタム3D）',
+  ...TEMPLATE_PROCEDURAL_SHAPE_LABELS,
+};
+
+/** 家具モデルが AI 画像構築のカスタム3Dモデルとして描画されるかを判定 */
+export function isCustomProceduralModel(model: FurnitureModelSpec): boolean {
+  return (
+    model.kind === 'procedural' &&
+    model.shapeType === 'custom' &&
+    Boolean(model.customModel && model.customModel.parts.length > 0)
+  );
+}
 
 export const FIXTURE_KIND_LABELS: Record<FixedFixtureKind, string> = {
   kitchen: 'システムキッチン',

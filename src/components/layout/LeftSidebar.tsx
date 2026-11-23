@@ -16,6 +16,7 @@ import {
   FIXTURE_KIND_LABELS,
   formatDimensionsCm,
   FURNITURE_CATEGORY_LABELS,
+  isCustomProceduralModel,
 } from '@/lib/units';
 import { usePlannerStore } from '@/store/usePlannerStore';
 import type {
@@ -166,6 +167,7 @@ export function LeftSidebar() {
               </div>
             ) : (
               filteredCatalog.map((asset) => {
+                const isCustom3D = isCustomProceduralModel(asset.model);
                 const swatchColor =
                   asset.model.kind === 'procedural' ? asset.model.color : '#64748B';
                 return (
@@ -194,10 +196,12 @@ export function LeftSidebar() {
                           title={
                             asset.model.kind === 'glb'
                               ? 'GLB 3Dモデル'
-                              : 'プロシージャルモデル'
+                              : isCustom3D
+                                ? 'AI画像再現3Dモデル'
+                                : 'プロシージャルモデル'
                           }
                         >
-                          {asset.model.kind === 'glb' ? 'GLB' : ''}
+                          {asset.model.kind === 'glb' ? 'GLB' : isCustom3D ? 'AI' : ''}
                         </div>
                       )}
                       <div className="min-w-0 flex-1">
@@ -212,7 +216,7 @@ export function LeftSidebar() {
                                 setEditingAsset(asset);
                                 setRegisterModalOpen(true);
                               }}
-                              title="家具情報・実寸を編集"
+                              title="家具情報・実寸・3Dモデルを編集"
                               className="rounded p-0.5 text-slate-400 hover:bg-blue-50 hover:text-blue-600"
                             >
                               <Pencil className="h-3.5 w-3.5" />
@@ -239,9 +243,16 @@ export function LeftSidebar() {
                           {formatDimensionsCm(asset.dimensions)}
                         </p>
                         <div className="mt-1.5 flex items-center justify-between gap-2">
-                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
-                            {FURNITURE_CATEGORY_LABELS[asset.category]}
-                          </span>
+                          <div className="flex items-center gap-1">
+                            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600">
+                              {FURNITURE_CATEGORY_LABELS[asset.category]}
+                            </span>
+                            {isCustom3D && (
+                              <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-700">
+                                AI再現
+                              </span>
+                            )}
+                          </div>
                           <button
                             type="button"
                             onClick={() => placeFurnitureFromCatalog(asset.id)}

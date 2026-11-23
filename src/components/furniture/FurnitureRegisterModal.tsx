@@ -8,9 +8,14 @@ import {
   Box,
   Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
   Globe,
+  Layers,
   Loader2,
   Plus,
+  RefreshCw,
   Save,
   Sparkles,
   Upload,
@@ -22,16 +27,19 @@ import {
   cmToDimensions,
   dimensionsToCm,
   FURNITURE_CATEGORY_LABELS,
-  PROCEDURAL_SHAPE_LABELS,
+  TEMPLATE_PROCEDURAL_SHAPE_LABELS,
 } from '@/lib/units';
 import { getFurnitureGenerationProvider } from '@/services/furniture/provider';
 import { usePlannerStore } from '@/store/usePlannerStore';
 import type {
+  CustomProceduralModel,
+  FurnitureAnalysisMode,
   FurnitureAnalysisResult,
   FurnitureAsset,
   FurnitureCategory,
   FurnitureModelSpec,
-  KnownProceduralShapeType,
+  ProceduralPartPrimitive,
+  TemplateProceduralShapeType,
 } from '@/types/planner';
 
 const FurniturePreview3D = dynamic(
@@ -42,7 +50,7 @@ const FurniturePreview3D = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="flex h-44 w-full items-center justify-center rounded-xl border border-slate-200 bg-slate-100 text-xs text-slate-400">
+      <div className="flex h-48 w-full items-center justify-center rounded-xl border border-slate-200 bg-slate-100 text-xs text-slate-400">
         3Dプレビューを読み込み中...
       </div>
     ),
@@ -56,8 +64,9 @@ interface FurnitureRegisterModalProps {
 }
 
 type RegisterTab = 'ai_photo' | 'manual';
+type VisualModelMode = 'custom' | 'template' | 'glb';
 
-const CATEGORY_DEFAULT_SHAPE: Record<FurnitureCategory, KnownProceduralShapeType> = {
+const CATEGORY_DEFAULT_SHAPE: Record<FurnitureCategory, TemplateProceduralShapeType> = {
   sofa: 'sofa',
   bed: 'bed',
   table: 'table',
@@ -127,6 +136,21 @@ const COLOR_PRESETS = [
   '#27272A',
 ];
 
+const PRIMITIVE_LABELS: Record<ProceduralPartPrimitive, string> = {
+  box: '直方体',
+  rounded_box: '角丸',
+  cylinder: '円柱',
+  sphere: '球体',
+  capsule: 'カプセル',
+  cone: '円錐',
+  torus: 'リング',
+  arch: 'アーチ',
+};
+
+function isTemplateShape(value: string): value is TemplateProceduralShapeType {
+  return value in TEMPLATE_PROCEDURAL_SHAPE_LABELS;
+}
+
 export function FurnitureRegisterModal({
   open,
   onClose,
@@ -139,9 +163,11 @@ export function FurnitureRegisterModal({
   );
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const manualPhotoInputRef = useRef<HTMLInputElement | null>(null);
   const [tab, setTab] = useState<RegisterTab>('ai_photo');
 
-  // 画像 & AI解析状態
+  // 画像 & AI解析・構築状態
+  const [analysisMode, setAnalysisMode] = useState<FurnitureAnalysisMode>('reconstruct');
   const [analysisImageDataUrl, setAnalysisImageDataUrl] = useState<string | null>(null);
   const [analysisImageMime, setAnalysisImageMime] = useState<string>('image/jpeg');
   const [thumbnailDataUrl, setThumbnailDataUrl] = useState<string | undefined>(
@@ -149,6 +175,7 @@ export function FurnitureRegisterModal({
   );
   const [fileName, setFileName] = useState<string>('');
   const [analyzing, setAnalyzing] = useState(false);
+  const [reconstructing, setReconstructing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [analysis, setAnalysis] = useState<FurnitureAnalysisResult | null>(null);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -156,8 +183,10 @@ export function FurnitureRegisterModal({
   // フォーム共通値（cm文字列で保持して未入力状態を明確に表現）
   const [name, setName] = useState('');
   const [category, setCategory] = useState<FurnitureCategory>('sofa');
-  const [modelKind, setModelKind] = useState<'procedural' | 'glb'>('procedural');
-  const [shapeType, setShapeType] = useState<KnownProceduralShapeType>('sofa');
+  const [visualMode, setVisualMode] = useState<VisualModelMode>('template');
+  const [templateShapeType, setTemplateShapeType] =
+    useState<TemplateProceduralShapeType>('sofa');
+  const [customModel, setCustomModel] = useState<CustomProceduralModel | null>(null);
   const [color, setColor] = useState('#5B7489');
   const [partsHint, setPartsHint] = useState<string[]>([]);
   const [glbUrl, setGlbUrl] = useState('');
@@ -166,6 +195,8 @@ export function FurnitureRegisterModal({
   const [heightCmStr, setHeightCmStr] = useState('78');
   const [memo, setMemo] = useState('');
   const [placeImmediately, setPlaceImmediately] = useState(true);
+  const [reconstructHint, setReconstructHint] = useState('');
+  const [showPartsList, setShowPartsList] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isEditing = Boolean(editingAsset);
@@ -175,37 +206,63 @@ export function FurnitureRegisterModal({
     if (!open) return;
     setError(null);
     setAnalyzing(false);
+    setReconstructing(false);
     setSubmitting(false);
+    setReconstructHint('');
+    setShowPartsList(false);
 
     if (editingAsset) {
       const dimsCm = dimensionsToCm(editingAsset.dimensions);
       setTab('manual');
+      setAnalysisMode('reconstruct');
       setName(editingAsset.name);
       setCategory(editingAsset.category);
       setThumbnailDataUrl(editingAsset.thumbnailDataUrl);
       setAnalysisImageDataUrl(null);
+      setAnalysisImageMime('image/jpeg');
+      setFileName('');
       setAnalysis(null);
       setWidthCmStr(String(Math.round(dimsCm.width)));
       setDepthCmStr(String(Math.round(dimsCm.depth)));
       setHeightCmStr(String(Math.round(dimsCm.height)));
       setMemo(editingAsset.memo ?? '');
+
       if (editingAsset.model.kind === 'glb') {
-        setModelKind('glb');
+        setVisualMode('glb');
         setGlbUrl(editingAsset.model.url);
+        setCustomModel(null);
+        setTemplateShapeType(CATEGORY_DEFAULT_SHAPE[editingAsset.category]);
       } else {
-        setModelKind('procedural');
-        setShapeType(
-          (editingAsset.model.shapeType as KnownProceduralShapeType) || 'box',
-        );
+        const existingCustom =
+          editingAsset.model.customModel &&
+          editingAsset.model.customModel.parts.length > 0
+            ? editingAsset.model.customModel
+            : null;
+        setCustomModel(existingCustom);
         setColor(editingAsset.model.color);
         setPartsHint(editingAsset.model.partsHint ?? []);
+        setGlbUrl('');
+
+        if (editingAsset.model.shapeType === 'custom' && existingCustom) {
+          setVisualMode('custom');
+          setTemplateShapeType(CATEGORY_DEFAULT_SHAPE[editingAsset.category]);
+        } else {
+          setVisualMode('template');
+          setTemplateShapeType(
+            isTemplateShape(editingAsset.model.shapeType)
+              ? editingAsset.model.shapeType
+              : CATEGORY_DEFAULT_SHAPE[editingAsset.category],
+          );
+        }
       }
     } else {
       setTab('ai_photo');
+      setAnalysisMode('reconstruct');
       setName('');
       setCategory('sofa');
-      setModelKind('procedural');
-      setShapeType('sofa');
+      setVisualMode('template');
+      setTemplateShapeType('sofa');
+      setCustomModel(null);
       setColor('#5B7489');
       setPartsHint([]);
       setGlbUrl('');
@@ -215,6 +272,7 @@ export function FurnitureRegisterModal({
       setMemo('');
       setPlaceImmediately(true);
       setAnalysisImageDataUrl(null);
+      setAnalysisImageMime('image/jpeg');
       setThumbnailDataUrl(undefined);
       setFileName('');
       setAnalysis(null);
@@ -223,25 +281,46 @@ export function FurnitureRegisterModal({
 
   // プレビュー用の実寸 (未入力項目はAI目安または既定値で仮表示)
   const previewDimensions = useMemo(() => {
-    const fallbackW = analysis?.estimatedDimensionsCm.width ?? 120;
-    const fallbackD = analysis?.estimatedDimensionsCm.depth ?? 60;
-    const fallbackH = analysis?.estimatedDimensionsCm.height ?? 75;
+    const fallbackW =
+      analysis?.estimatedDimensionsCm.width ??
+      customModel?.designDimensionsCm.width ??
+      120;
+    const fallbackD =
+      analysis?.estimatedDimensionsCm.depth ??
+      customModel?.designDimensionsCm.depth ??
+      60;
+    const fallbackH =
+      analysis?.estimatedDimensionsCm.height ??
+      customModel?.designDimensionsCm.height ??
+      75;
     const w = Number(widthCmStr) > 0 ? Number(widthCmStr) : fallbackW;
     const d = Number(depthCmStr) > 0 ? Number(depthCmStr) : fallbackD;
     const h = Number(heightCmStr) > 0 ? Number(heightCmStr) : fallbackH;
     return cmToDimensions({ width: w, depth: d, height: h });
-  }, [widthCmStr, depthCmStr, heightCmStr, analysis]);
+  }, [widthCmStr, depthCmStr, heightCmStr, analysis, customModel]);
 
   const previewAsset = useMemo<FurnitureAsset>(() => {
-    const model: FurnitureModelSpec =
-      modelKind === 'glb' && glbUrl.trim()
-        ? { kind: 'glb', url: glbUrl.trim(), normalizeScale: true }
-        : {
-            kind: 'procedural',
-            shapeType,
-            color,
-            partsHint,
-          };
+    let model: FurnitureModelSpec;
+    if (visualMode === 'glb' && glbUrl.trim()) {
+      model = { kind: 'glb', url: glbUrl.trim(), normalizeScale: true };
+    } else if (visualMode === 'custom' && customModel && customModel.parts.length > 0) {
+      model = {
+        kind: 'procedural',
+        shapeType: 'custom',
+        color,
+        partsHint,
+        customModel,
+      };
+    } else {
+      model = {
+        kind: 'procedural',
+        shapeType: templateShapeType,
+        color,
+        partsHint,
+        ...(customModel ? { customModel } : {}),
+      };
+    }
+
     return {
       id: 'preview',
       name: name || 'プレビュー',
@@ -251,14 +330,26 @@ export function FurnitureRegisterModal({
       createdAt: '',
       updatedAt: '',
     };
-  }, [modelKind, glbUrl, shapeType, color, partsHint, name, category, previewDimensions]);
+  }, [
+    visualMode,
+    glbUrl,
+    customModel,
+    templateShapeType,
+    color,
+    partsHint,
+    name,
+    category,
+    previewDimensions,
+  ]);
 
   if (!open) return null;
+
+  const activePhotoForReconstruct = analysisImageDataUrl ?? thumbnailDataUrl ?? null;
 
   const handleCategoryChange = (nextCategory: FurnitureCategory) => {
     setCategory(nextCategory);
     if (!analysis) {
-      setShapeType(CATEGORY_DEFAULT_SHAPE[nextCategory]);
+      setTemplateShapeType(CATEGORY_DEFAULT_SHAPE[nextCategory]);
       const dims = CATEGORY_DEFAULT_CM[nextCategory];
       setWidthCmStr(String(dims.width));
       setDepthCmStr(String(dims.depth));
@@ -266,7 +357,10 @@ export function FurnitureRegisterModal({
     }
   };
 
-  const handleImageSelected = async (file: File | undefined) => {
+  const handleImageSelected = async (
+    file: File | undefined,
+    options?: { resetAnalysis?: boolean },
+  ) => {
     if (!file) return;
     if (!file.type.startsWith('image/')) {
       setError('PNG・JPEG・WebP などの画像ファイルを選択してください。');
@@ -274,7 +368,10 @@ export function FurnitureRegisterModal({
     }
 
     setError(null);
-    setAnalysis(null);
+    if (options?.resetAnalysis !== false) {
+      setAnalysis(null);
+      setCustomModel(null);
+    }
     try {
       const [forAnalysis, forThumb] = await Promise.all([
         loadAndResizeImageFile(file, { maxDimension: 1024, quality: 0.85 }),
@@ -291,7 +388,7 @@ export function FurnitureRegisterModal({
     }
   };
 
-  // FurnitureGenerationProvider 経由で家具画像を解析
+  // FurnitureGenerationProvider 経由で家具画像を解析（AI構築 or 定型判定）
   const handleRunAiAnalysis = async () => {
     if (!analysisImageDataUrl) return;
     setAnalyzing(true);
@@ -302,17 +399,30 @@ export function FurnitureRegisterModal({
       const result = await provider.analyzeImage(
         analysisImageDataUrl,
         analysisImageMime,
+        { mode: analysisMode },
       );
       setAnalysis(result);
       setName(result.suggestedName);
       setCategory(result.category);
-      setModelKind('procedural');
-      setShapeType(
-        (result.shapeType as KnownProceduralShapeType) ||
-          CATEGORY_DEFAULT_SHAPE[result.category],
-      );
       setColor(result.primaryColor);
       setPartsHint(result.partsHint);
+
+      const fallbackTemplate: TemplateProceduralShapeType =
+        result.fallbackTemplateShapeType &&
+        isTemplateShape(result.fallbackTemplateShapeType)
+          ? result.fallbackTemplateShapeType
+          : isTemplateShape(result.shapeType)
+            ? result.shapeType
+            : CATEGORY_DEFAULT_SHAPE[result.category];
+      setTemplateShapeType(fallbackTemplate);
+
+      if (result.customModel && result.customModel.parts.length > 0) {
+        setCustomModel(result.customModel);
+        setVisualMode('custom');
+      } else {
+        setCustomModel(null);
+        setVisualMode('template');
+      }
 
       // 対話型サイズ入力のため、実寸入力欄はいったん空欄にしてユーザー入力を促す
       setWidthCmStr('');
@@ -327,6 +437,66 @@ export function FurnitureRegisterModal({
     } finally {
       setAnalyzing(false);
     }
+  };
+
+  // 添付写真（または既存サムネイル）からカスタム3Dパーツ構成を構築・再構築
+  const handleRunReconstruct = async () => {
+    if (!activePhotoForReconstruct) {
+      setError('3D構築に使う家具の写真をアップロードしてください。');
+      return;
+    }
+
+    setReconstructing(true);
+    setError(null);
+
+    try {
+      const provider = getFurnitureGenerationProvider();
+      const parsedW = Number(widthCmStr);
+      const parsedD = Number(depthCmStr);
+      const parsedH = Number(heightCmStr);
+
+      const dimsCm =
+        parsedW > 0 && parsedD > 0 && parsedH > 0
+          ? { width: parsedW, depth: parsedD, height: parsedH }
+          : analysis?.estimatedDimensionsCm ?? customModel?.designDimensionsCm;
+
+      const reconstructed = await provider.reconstructFromImage({
+        imageDataUrl: activePhotoForReconstruct,
+        mimeType: analysisImageMime || 'image/jpeg',
+        suggestedName: name.trim() || analysis?.suggestedName,
+        category,
+        dimensionsCm: dimsCm,
+        userHint: reconstructHint.trim() || undefined,
+      });
+
+      setCustomModel(reconstructed);
+      setVisualMode('custom');
+      if (analysis) {
+        setAnalysis({
+          ...analysis,
+          shapeType: 'custom',
+          customModel: reconstructed,
+        });
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : '家具の3D構築中にエラーが発生しました。',
+      );
+    } finally {
+      setReconstructing(false);
+    }
+  };
+
+  const handleUpdatePartColor = (partIndex: number, nextColor: string) => {
+    setCustomModel((prev) => {
+      if (!prev) return prev;
+      const nextParts = prev.parts.map((part, idx) =>
+        idx === partIndex ? { ...part, color: nextColor.toUpperCase() } : part,
+      );
+      return { ...prev, parts: nextParts };
+    });
   };
 
   const applyEstimatedDimensions = () => {
@@ -359,8 +529,14 @@ export function FurnitureRegisterModal({
       setError('幅・奥行・高さ（cm）をすべて 1cm 以上の数値で入力してください。');
       return;
     }
-    if (modelKind === 'glb' && !glbUrl.trim()) {
+    if (visualMode === 'glb' && !glbUrl.trim()) {
       setError('GLB モデルの URL を入力してください。');
+      return;
+    }
+    if (visualMode === 'custom' && (!customModel || customModel.parts.length === 0)) {
+      setError(
+        'AI画像再現モデルがまだ構築されていません。写真から「AIで3D構築」を実行するか、定型3Dを選択してください。',
+      );
       return;
     }
 
@@ -384,24 +560,35 @@ export function FurnitureRegisterModal({
             suggestedName: trimmedName,
             category,
             primaryColor: color,
-            shapeType,
+            shapeType: visualMode === 'custom' ? 'custom' : templateShapeType,
+            fallbackTemplateShapeType: templateShapeType,
             partsHint,
+            customModel: customModel ?? undefined,
           },
           dimensions,
           imageDataUrl: analysisImageDataUrl ?? undefined,
         });
-      } else if (modelKind === 'glb') {
+      } else if (visualMode === 'glb') {
         model = {
           kind: 'glb',
           url: glbUrl.trim(),
           normalizeScale: true,
         };
+      } else if (visualMode === 'custom' && customModel) {
+        model = {
+          kind: 'procedural',
+          shapeType: 'custom',
+          color,
+          partsHint,
+          customModel,
+        };
       } else {
         model = {
           kind: 'procedural',
-          shapeType,
+          shapeType: templateShapeType,
           color,
           partsHint,
+          ...(customModel ? { customModel } : {}),
         };
       }
 
@@ -443,6 +630,14 @@ export function FurnitureRegisterModal({
   const dimensionInputsReady =
     Number(widthCmStr) > 0 && Number(depthCmStr) > 0 && Number(heightCmStr) > 0;
   const presets = CATEGORY_PRESETS[category];
+  const hasCustomModel = Boolean(customModel && customModel.parts.length > 0);
+
+  const previewBadge =
+    visualMode === 'custom' && hasCustomModel
+      ? `AI画像再現 (${customModel!.parts.length}パーツ)`
+      : visualMode === 'glb'
+        ? 'GLB 3Dモデル'
+        : `定型: ${TEMPLATE_PROCEDURAL_SHAPE_LABELS[templateShapeType]}`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-[1px]">
@@ -485,7 +680,7 @@ export function FurnitureRegisterModal({
               }`}
             >
               <Camera className="h-3.5 w-3.5" />
-              写真からAI登録（対話型サイズ入力）
+              写真からAI登録・3D構築
             </button>
             <button
               type="button"
@@ -532,12 +727,12 @@ export function FurnitureRegisterModal({
               </div>
             )}
 
-            {/* ==================== タブ1: 写真からAI登録 ==================== */}
+            {/* ==================== タブ1: 写真からAI登録・3D構築 ==================== */}
             {tab === 'ai_photo' && !isEditing ? (
               <div className="space-y-4">
-                {/* Step 1: 写真アップロード */}
+                {/* Step 1: 写真アップロード & 生成方式選択 */}
                 {!analysis ? (
-                  <div className="space-y-3">
+                  <div className="space-y-3.5">
                     <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
                       <span className="flex h-5 w-5 items-center justify-center rounded-full bg-blue-600 text-[10px] text-white">
                         1
@@ -597,29 +792,104 @@ export function FurnitureRegisterModal({
                       )}
                     </div>
 
+                    {/* 3D生成方式の選択 */}
+                    <div className="space-y-1.5">
+                      <div className="text-xs font-bold text-slate-700">
+                        3Dモデルの生成方式（解析後いつでも切替できます）
+                      </div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <button
+                          type="button"
+                          onClick={() => setAnalysisMode('reconstruct')}
+                          className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition ${
+                            analysisMode === 'reconstruct'
+                              ? 'border-indigo-500 bg-indigo-50/70 ring-1 ring-indigo-300'
+                              : 'border-slate-200 bg-white hover:border-slate-300'
+                          }`}
+                        >
+                          <div
+                            className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
+                              analysisMode === 'reconstruct'
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-slate-100 text-slate-500'
+                            }`}
+                          >
+                            <Cpu className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 text-xs font-bold text-slate-900">
+                              画像から3D構築（AI再現）
+                              <span className="rounded bg-indigo-600 px-1.5 py-0.5 text-[9px] font-semibold text-white">
+                                おすすめ
+                              </span>
+                            </div>
+                            <p className="mt-0.5 text-[11px] leading-snug text-slate-600">
+                              写真固有の形状・脚・棚・色分け・素材感をAIが複数パーツで立体再現します
+                            </p>
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setAnalysisMode('template')}
+                          className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition ${
+                            analysisMode === 'template'
+                              ? 'border-blue-500 bg-blue-50/70 ring-1 ring-blue-300'
+                              : 'border-slate-200 bg-white hover:border-slate-300'
+                          }`}
+                        >
+                          <div
+                            className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
+                              analysisMode === 'template'
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-slate-100 text-slate-500'
+                            }`}
+                          >
+                            <Box className="h-4 w-4" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-slate-900">
+                              定型テンプレート判定
+                            </div>
+                            <p className="mt-0.5 text-[11px] leading-snug text-slate-600">
+                              12種類の基本形状から最も近い形と代表色を選びます（シンプル・高速）
+                            </p>
+                          </div>
+                        </button>
+                      </div>
+                    </div>
+
                     <div className="flex justify-end">
                       <button
                         type="button"
                         disabled={!analysisImageDataUrl || analyzing}
                         onClick={() => void handleRunAiAnalysis()}
-                        className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-45"
+                        className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold text-white shadow-xs disabled:cursor-not-allowed disabled:opacity-45 ${
+                          analysisMode === 'reconstruct'
+                            ? 'bg-indigo-600 hover:bg-indigo-700'
+                            : 'bg-blue-600 hover:bg-blue-700'
+                        }`}
                       >
                         {analyzing ? (
                           <>
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            Gemini で家具の特徴を解析中...
+                            {analysisMode === 'reconstruct'
+                              ? 'Gemini で写真を解析し 3D パーツを構築中...'
+                              : 'Gemini で家具の特徴を解析中...'}
                           </>
                         ) : (
                           <>
                             <Sparkles className="h-3.5 w-3.5" />
-                            AIで種類・色・形状を判定する
+                            {analysisMode === 'reconstruct'
+                              ? 'AIで解析して写真から3D構築する'
+                              : 'AIで種類・色・形状を判定する'}
                           </>
                         )}
                       </button>
                     </div>
                   </div>
                 ) : (
-                  /* Step 2: 対話型サイズ入力 UI */
+                  /* Step 2: 対話型サイズ入力 & 3D再現確認・切替 UI */
                   <div className="space-y-4">
                     {/* AI アシスタントの対話吹き出し */}
                     <div className="flex items-start gap-3 rounded-xl border border-blue-200 bg-blue-50/70 p-3.5">
@@ -629,11 +899,18 @@ export function FurnitureRegisterModal({
                       <div className="min-w-0 flex-1 space-y-2">
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-xs font-bold text-blue-950">
-                            AI 判定完了 — 実寸サイズ（cm）を教えてください
+                            {hasCustomModel
+                              ? 'AI 解析・3D構築完了 — 実寸サイズ（cm）を教えてください'
+                              : 'AI 判定完了 — 実寸サイズ（cm）を教えてください'}
                           </span>
                           <button
                             type="button"
-                            onClick={() => setAnalysis(null)}
+                            onClick={() => {
+                              setAnalysis(null);
+                              setCustomModel(null);
+                              setReconstructHint('');
+                              setShowPartsList(false);
+                            }}
                             className="text-[11px] font-medium text-blue-700 hover:underline"
                           >
                             写真をやり直す
@@ -642,6 +919,12 @@ export function FurnitureRegisterModal({
                         <p className="text-xs leading-relaxed text-slate-700">
                           {analysis.summaryJa}
                         </p>
+                        {customModel?.structureSummaryJa && visualMode === 'custom' && (
+                          <p className="rounded-lg border border-indigo-200/80 bg-indigo-50/80 px-2.5 py-1.5 text-[11px] leading-relaxed text-indigo-900">
+                            <span className="font-bold">3D構築内容:</span>{' '}
+                            {customModel.structureSummaryJa}
+                          </p>
+                        )}
                         <div className="flex flex-wrap items-center gap-1.5">
                           <span className="rounded bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-700 shadow-2xs">
                             カテゴリ: {FURNITURE_CATEGORY_LABELS[category]}
@@ -667,13 +950,13 @@ export function FurnitureRegisterModal({
 
                     {/* 写真＋3Dプレビュー 横並び */}
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <div className="flex h-44 flex-col items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-2">
+                      <div className="flex h-48 flex-col items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50 p-2">
                         {thumbnailDataUrl && (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={thumbnailDataUrl}
                             alt="アップロード家具"
-                            className="max-h-36 rounded-lg object-contain"
+                            className="max-h-40 rounded-lg object-contain"
                           />
                         )}
                         <span className="mt-1 text-[10px] text-slate-400">
@@ -683,7 +966,159 @@ export function FurnitureRegisterModal({
                       <FurniturePreview3D
                         asset={previewAsset}
                         dimensions={previewDimensions}
+                        badgeText={previewBadge}
+                        heightClassName="h-48"
                       />
+                    </div>
+
+                    {/* 3Dモデル方式の切替 & AI再構築コントロール */}
+                    <div className="space-y-2.5 rounded-xl border border-indigo-200/80 bg-indigo-50/40 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 text-xs font-bold text-slate-800">
+                          <Layers className="h-3.5 w-3.5 text-indigo-600" />
+                          3Dモデルの表現方式
+                        </span>
+                        <div className="grid grid-cols-2 gap-1 rounded-lg border border-slate-200 bg-white p-0.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (hasCustomModel) {
+                                setVisualMode('custom');
+                              } else {
+                                void handleRunReconstruct();
+                              }
+                            }}
+                            disabled={reconstructing}
+                            className={`flex items-center justify-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                              visualMode === 'custom' && hasCustomModel
+                                ? 'bg-indigo-600 text-white shadow-2xs'
+                                : 'text-slate-600 hover:bg-slate-100'
+                            }`}
+                          >
+                            <Sparkles className="h-3 w-3" />
+                            {hasCustomModel ? 'AI画像再現' : '写真からAI構築'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setVisualMode('template')}
+                            className={`flex items-center justify-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold transition ${
+                              visualMode === 'template'
+                                ? 'bg-blue-600 text-white shadow-2xs'
+                                : 'text-slate-600 hover:bg-slate-100'
+                            }`}
+                          >
+                            <Box className="h-3 w-3" />
+                            定型テンプレート
+                          </button>
+                        </div>
+                      </div>
+
+                      {visualMode === 'custom' && hasCustomModel ? (
+                        <div className="space-y-2">
+                          <div className="flex flex-col gap-1.5 sm:flex-row">
+                            <input
+                              type="text"
+                              value={reconstructHint}
+                              onChange={(e) => setReconstructHint(e.target.value)}
+                              placeholder="微調整ヒント（任意）例: 脚を黒い細アイアンに、棚を4段に、天板を丸く"
+                              className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none"
+                            />
+                            <button
+                              type="button"
+                              disabled={reconstructing || !activePhotoForReconstruct}
+                              onClick={() => void handleRunReconstruct()}
+                              className="flex shrink-0 items-center justify-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                              {reconstructing ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  再構築中...
+                                </>
+                              ) : (
+                                <>
+                                  <RefreshCw className="h-3.5 w-3.5" />
+                                  AIで再構築
+                                </>
+                              )}
+                            </button>
+                          </div>
+                          <p className="text-[10px] text-slate-500">
+                            実寸（cm）を入力した後に「AIで再構築」を押すと、確定した縦横比に合わせてパーツ構成を作り直せます。
+                          </p>
+
+                          {/* 構成パーツ一覧とパーツ色調整 */}
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => setShowPartsList((v) => !v)}
+                              className="flex items-center gap-1 text-[11px] font-semibold text-indigo-700 hover:underline"
+                            >
+                              {showPartsList ? (
+                                <ChevronUp className="h-3.5 w-3.5" />
+                              ) : (
+                                <ChevronDown className="h-3.5 w-3.5" />
+                              )}
+                              構成パーツを確認・色調整する ({customModel!.parts.length}パーツ)
+                            </button>
+                            {showPartsList && (
+                              <div className="mt-2 grid max-h-40 grid-cols-1 gap-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 sm:grid-cols-2">
+                                {customModel!.parts.map((part, idx) => (
+                                  <div
+                                    key={`${idx}-${part.name}`}
+                                    className="flex items-center justify-between gap-2 rounded-md border border-slate-100 bg-slate-50/70 px-2 py-1 text-[11px]"
+                                  >
+                                    <div className="min-w-0 truncate">
+                                      <span className="font-medium text-slate-800">
+                                        {part.name}
+                                      </span>
+                                      <span className="ml-1 text-[10px] text-slate-400">
+                                        ({PRIMITIVE_LABELS[part.primitive]})
+                                      </span>
+                                    </div>
+                                    <input
+                                      type="color"
+                                      value={part.color}
+                                      onChange={(e) =>
+                                        handleUpdatePartColor(idx, e.target.value)
+                                      }
+                                      title={`${part.name} の色を変更`}
+                                      className="h-5 w-7 shrink-0 cursor-pointer rounded border border-slate-300 bg-white p-0.5"
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                          <span>
+                            {hasCustomModel
+                              ? '定型テンプレートで表示中です。「AI画像再現」で写真から構築したモデルへ戻せます。'
+                              : '写真の形状・構造そのものをパーツ組み立てで再現することもできます。'}
+                          </span>
+                          {!hasCustomModel && (
+                            <button
+                              type="button"
+                              disabled={reconstructing || !activePhotoForReconstruct}
+                              onClick={() => void handleRunReconstruct()}
+                              className="flex items-center gap-1 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                            >
+                              {reconstructing ? (
+                                <>
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  3D構築中...
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="h-3.5 w-3.5" />
+                                  写真から3D構築を実行
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
 
                     {/* 対話型サイズ入力カード */}
@@ -792,7 +1227,7 @@ export function FurnitureRegisterModal({
                       </div>
                     </div>
 
-                    {/* 家具名・形状・カラーの微調整 */}
+                    {/* 家具名・（定型選択時のみ）形状＆カラー微調整 */}
                     <div className="grid grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3 sm:grid-cols-2">
                       <div className="sm:col-span-2">
                         <label className="mb-1 block text-[11px] font-semibold text-slate-700">
@@ -806,63 +1241,71 @@ export function FurnitureRegisterModal({
                         />
                       </div>
 
-                      <div>
-                        <label className="mb-1 block text-[11px] font-semibold text-slate-700">
-                          3D形状タイプ
-                        </label>
-                        <select
-                          value={shapeType}
-                          onChange={(e) =>
-                            setShapeType(e.target.value as KnownProceduralShapeType)
-                          }
-                          className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900"
-                        >
-                          {(
-                            Object.entries(PROCEDURAL_SHAPE_LABELS) as Array<
-                              [KnownProceduralShapeType, string]
+                      {visualMode === 'template' && (
+                        <>
+                          <div>
+                            <label className="mb-1 block text-[11px] font-semibold text-slate-700">
+                              定型3D形状タイプ
+                            </label>
+                            <select
+                              value={templateShapeType}
+                              onChange={(e) =>
+                                setTemplateShapeType(
+                                  e.target.value as TemplateProceduralShapeType,
+                                )
+                              }
+                              className="w-full rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900"
                             >
-                          ).map(([key, label]) => (
-                            <option key={key} value={key}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="mb-1 block text-[11px] font-semibold text-slate-700">
-                          カラー調整
-                        </label>
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="color"
-                            value={color}
-                            onChange={(e) => setColor(e.target.value)}
-                            className="h-7 w-9 cursor-pointer rounded border border-slate-300 bg-white p-0.5"
-                          />
-                          <div className="flex flex-wrap gap-1">
-                            {COLOR_PRESETS.slice(0, 6).map((preset) => (
-                              <button
-                                key={preset}
-                                type="button"
-                                onClick={() => setColor(preset)}
-                                className="h-5 w-5 rounded-full border border-slate-300"
-                                style={{ backgroundColor: preset }}
-                              />
-                            ))}
+                              {(
+                                Object.entries(TEMPLATE_PROCEDURAL_SHAPE_LABELS) as Array<
+                                  [TemplateProceduralShapeType, string]
+                                >
+                              ).map(([key, label]) => (
+                                <option key={key} value={key}>
+                                  {label}
+                                </option>
+                              ))}
+                            </select>
                           </div>
-                        </div>
-                      </div>
+
+                          <div>
+                            <label className="mb-1 block text-[11px] font-semibold text-slate-700">
+                              カラー調整
+                            </label>
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="color"
+                                value={color}
+                                onChange={(e) => setColor(e.target.value)}
+                                className="h-7 w-9 cursor-pointer rounded border border-slate-300 bg-white p-0.5"
+                              />
+                              <div className="flex flex-wrap gap-1">
+                                {COLOR_PRESETS.slice(0, 6).map((preset) => (
+                                  <button
+                                    key={preset}
+                                    type="button"
+                                    onClick={() => setColor(preset)}
+                                    className="h-5 w-5 rounded-full border border-slate-300"
+                                    style={{ backgroundColor: preset }}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}
               </div>
             ) : (
-              /* ==================== タブ2: 手動入力 / GLB URL / 編集 ==================== */
+              /* ==================== タブ2: 手動入力 / GLB URL / 既存家具編集 ==================== */
               <div className="space-y-4">
                 <FurniturePreview3D
                   asset={previewAsset}
                   dimensions={previewDimensions}
+                  badgeText={previewBadge}
+                  heightClassName="h-48"
                 />
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -906,51 +1349,182 @@ export function FurnitureRegisterModal({
                     <label className="mb-1 block text-xs font-medium text-slate-700">
                       3Dモデル種別
                     </label>
-                    <div className="grid grid-cols-2 gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+                    <div className="grid grid-cols-3 gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
                       <button
                         type="button"
-                        onClick={() => setModelKind('procedural')}
-                        className={`flex items-center justify-center gap-1 rounded-md py-1.5 text-xs font-medium transition ${
-                          modelKind === 'procedural'
-                            ? 'bg-white text-blue-600 shadow-xs'
-                            : 'text-slate-600'
+                        onClick={() => setVisualMode('custom')}
+                        className={`flex items-center justify-center gap-1 rounded-md py-1.5 text-[11px] font-medium transition ${
+                          visualMode === 'custom'
+                            ? 'bg-indigo-600 text-white shadow-xs'
+                            : 'text-slate-600 hover:bg-white'
                         }`}
                       >
-                        <Box className="h-3.5 w-3.5" />
-                        簡易3D
+                        <Sparkles className="h-3 w-3" />
+                        AI再現
                       </button>
                       <button
                         type="button"
-                        onClick={() => setModelKind('glb')}
-                        className={`flex items-center justify-center gap-1 rounded-md py-1.5 text-xs font-medium transition ${
-                          modelKind === 'glb'
+                        onClick={() => setVisualMode('template')}
+                        className={`flex items-center justify-center gap-1 rounded-md py-1.5 text-[11px] font-medium transition ${
+                          visualMode === 'template'
                             ? 'bg-white text-blue-600 shadow-xs'
-                            : 'text-slate-600'
+                            : 'text-slate-600 hover:bg-white'
                         }`}
                       >
-                        <Globe className="h-3.5 w-3.5" />
-                        GLB URL
+                        <Box className="h-3 w-3" />
+                        定型3D
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setVisualMode('glb')}
+                        className={`flex items-center justify-center gap-1 rounded-md py-1.5 text-[11px] font-medium transition ${
+                          visualMode === 'glb'
+                            ? 'bg-white text-blue-600 shadow-xs'
+                            : 'text-slate-600 hover:bg-white'
+                        }`}
+                      >
+                        <Globe className="h-3 w-3" />
+                        GLB
                       </button>
                     </div>
                   </div>
                 </div>
 
-                {modelKind === 'procedural' ? (
+                {visualMode === 'custom' ? (
+                  <div className="space-y-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <div className="text-xs font-bold text-indigo-950">
+                          写真からAIで3Dモデルを構築・再構築
+                        </div>
+                        <p className="text-[11px] text-slate-600">
+                          家具の写真を読み込んで、パーツ構成による立体モデルを生成します
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => manualPhotoInputRef.current?.click()}
+                        className="flex items-center gap-1 rounded-lg border border-indigo-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-50"
+                      >
+                        <Upload className="h-3.5 w-3.5" />
+                        {activePhotoForReconstruct ? '写真を変更' : '写真を選択'}
+                      </button>
+                      <input
+                        ref={manualPhotoInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) =>
+                          void handleImageSelected(e.target.files?.[0], {
+                            resetAnalysis: false,
+                          })
+                        }
+                      />
+                    </div>
+
+                    {activePhotoForReconstruct && (
+                      <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={activePhotoForReconstruct}
+                          alt="参照写真"
+                          className="h-14 w-14 shrink-0 rounded-md border border-slate-200 bg-slate-50 object-contain"
+                        />
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <input
+                            type="text"
+                            value={reconstructHint}
+                            onChange={(e) => setReconstructHint(e.target.value)}
+                            placeholder="微調整ヒント（任意）例: 脚を細く、肘掛けを追加"
+                            className="w-full rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-900 focus:border-indigo-500 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            disabled={reconstructing}
+                            onClick={() => void handleRunReconstruct()}
+                            className="flex items-center gap-1 rounded-md bg-indigo-600 px-3 py-1 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                          >
+                            {reconstructing ? (
+                              <>
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                Gemini で3D構築中...
+                              </>
+                            ) : (
+                              <>
+                                <Sparkles className="h-3.5 w-3.5" />
+                                {hasCustomModel
+                                  ? 'この写真でAI再構築する'
+                                  : 'この写真からAIで3D構築する'}
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {hasCustomModel && customModel && (
+                      <div className="space-y-1.5">
+                        {customModel.structureSummaryJa && (
+                          <p className="text-[11px] text-indigo-900">
+                            <span className="font-semibold">構築済み:</span>{' '}
+                            {customModel.structureSummaryJa}
+                          </p>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setShowPartsList((v) => !v)}
+                          className="flex items-center gap-1 text-[11px] font-semibold text-indigo-700 hover:underline"
+                        >
+                          {showPartsList ? (
+                            <ChevronUp className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          )}
+                          構成パーツの色を調整 ({customModel.parts.length}パーツ)
+                        </button>
+                        {showPartsList && (
+                          <div className="grid max-h-36 grid-cols-1 gap-1.5 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 sm:grid-cols-2">
+                            {customModel.parts.map((part, idx) => (
+                              <div
+                                key={`${idx}-${part.name}`}
+                                className="flex items-center justify-between gap-2 rounded-md border border-slate-100 bg-slate-50/70 px-2 py-1 text-[11px]"
+                              >
+                                <span className="min-w-0 truncate font-medium text-slate-800">
+                                  {part.name}
+                                </span>
+                                <input
+                                  type="color"
+                                  value={part.color}
+                                  onChange={(e) =>
+                                    handleUpdatePartColor(idx, e.target.value)
+                                  }
+                                  className="h-5 w-7 shrink-0 cursor-pointer rounded border border-slate-300 bg-white p-0.5"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ) : visualMode === 'template' ? (
                   <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/70 p-3">
                     <div>
                       <label className="mb-1 block text-xs font-medium text-slate-700">
-                        プロシージャル形状
+                        定型プロシージャル形状
                       </label>
                       <select
-                        value={shapeType}
+                        value={templateShapeType}
                         onChange={(e) =>
-                          setShapeType(e.target.value as KnownProceduralShapeType)
+                          setTemplateShapeType(
+                            e.target.value as TemplateProceduralShapeType,
+                          )
                         }
                         className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"
                       >
                         {(
-                          Object.entries(PROCEDURAL_SHAPE_LABELS) as Array<
-                            [KnownProceduralShapeType, string]
+                          Object.entries(TEMPLATE_PROCEDURAL_SHAPE_LABELS) as Array<
+                            [TemplateProceduralShapeType, string]
                           >
                         ).map(([key, label]) => (
                           <option key={key} value={key}>
@@ -1116,7 +1690,11 @@ export function FurnitureRegisterModal({
             {(tab === 'manual' || Boolean(analysis) || isEditing) && (
               <button
                 type="submit"
-                disabled={submitting || (!dimensionInputsReady && tab === 'ai_photo')}
+                disabled={
+                  submitting ||
+                  reconstructing ||
+                  (!dimensionInputsReady && tab === 'ai_photo')
+                }
                 className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-45"
               >
                 {submitting ? (

@@ -74,10 +74,39 @@ function isValidDimensions(value: unknown): boolean {
   );
 }
 
+function isFiniteNumberTuple3(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length === 3 &&
+    value.every((n) => typeof n === 'number' && Number.isFinite(n))
+  );
+}
+
+function isValidCustomModel(value: unknown): boolean {
+  if (!isObjectRecord(value)) return false;
+  if (!isValidDimensions(value.designDimensionsCm)) return false;
+  if (!Array.isArray(value.parts) || value.parts.length === 0) return false;
+  return value.parts.every(
+    (part) =>
+      isObjectRecord(part) &&
+      typeof part.name === 'string' &&
+      typeof part.primitive === 'string' &&
+      isFiniteNumberTuple3(part.position) &&
+      isFiniteNumberTuple3(part.size) &&
+      typeof part.color === 'string',
+  );
+}
+
 function isValidModelSpec(value: unknown): boolean {
   if (!isObjectRecord(value)) return false;
   if (value.kind === 'procedural') {
-    return typeof value.shapeType === 'string' && typeof value.color === 'string';
+    if (typeof value.shapeType !== 'string' || typeof value.color !== 'string') {
+      return false;
+    }
+    if (value.customModel !== undefined && !isValidCustomModel(value.customModel)) {
+      return false;
+    }
+    return true;
   }
   if (value.kind === 'glb') {
     return typeof value.url === 'string' && typeof value.normalizeScale === 'boolean';

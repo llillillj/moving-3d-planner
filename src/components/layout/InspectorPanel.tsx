@@ -21,6 +21,7 @@ import {
   FIXTURE_KIND_LABELS,
   formatDimensionsCm,
   FURNITURE_CATEGORY_LABELS,
+  isCustomProceduralModel,
   metersToCm,
   radToDeg,
   WALL_KIND_LABELS,
@@ -129,6 +130,11 @@ export function InspectorPanel() {
       const dims = placement.dimensionsOverride ?? asset.dimensions;
       const deg = Math.round(radToDeg(placement.rotationY));
       const locked = Boolean(placement.locked);
+      const isCustom3D = isCustomProceduralModel(asset.model);
+      const customSummary =
+        isCustom3D && asset.model.kind === 'procedural'
+          ? asset.model.customModel?.structureSummaryJa
+          : undefined;
 
       return (
         <aside className="flex h-full w-72 shrink-0 flex-col overflow-y-auto border-l border-slate-200 bg-white p-3.5">
@@ -137,8 +143,16 @@ export function InspectorPanel() {
               <span className="rounded bg-blue-50 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
                 配置家具 ・ {FURNITURE_CATEGORY_LABELS[asset.category]}
               </span>
-              <span className="text-[10px] text-slate-400">
-                {asset.model.kind === 'glb' ? 'GLBモデル' : 'プロシージャル'}
+              <span
+                className={`text-[10px] font-medium ${
+                  isCustom3D ? 'text-indigo-600' : 'text-slate-400'
+                }`}
+              >
+                {asset.model.kind === 'glb'
+                  ? 'GLBモデル'
+                  : isCustom3D
+                    ? 'AI画像再現3D'
+                    : '定型3D'}
               </span>
             </div>
             <div className="mt-2 flex items-center gap-2.5">
@@ -159,6 +173,11 @@ export function InspectorPanel() {
                 </p>
               </div>
             </div>
+            {customSummary && (
+              <p className="mt-2 rounded-lg bg-indigo-50/70 px-2 py-1 text-[10px] leading-relaxed text-indigo-800">
+                {customSummary}
+              </p>
+            )}
           </div>
 
           <div className="mt-3.5 space-y-4">
